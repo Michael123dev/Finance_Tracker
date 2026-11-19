@@ -1,0 +1,21 @@
+<resources>
+    <style name="AppTheme" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:colorPrimary">#FFCD03</item>
+        <item name="android:colorPrimaryDark">@color/bg</item>
+        <item name="android:colorAccent">#8A6D00</item>
+        <item name="android:colorControlActivated">#8A6D00</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:textColorHighlight">#66FFCD03</item>
+    </style>
+    <style name="DialogTheme" parent="android:Theme.Material.Light.Dialog.Alert">
+        <item name="android:colorAccent">#6E5600</item>
+        <item name="android:colorControlActivated">#8A6D00</item>
+    </style>
+    <style name="PickerTheme" parent="android:Theme.Material.Light.Dialog">
+        <item name="android:colorAccent">#6E5600</item>
+        <item name="android:colorControlActivated">#6E5600</item>
+    </style>
+</resources>
