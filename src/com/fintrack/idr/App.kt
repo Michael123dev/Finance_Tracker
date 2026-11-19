@@ -1,7 +1,9 @@
 package com.fintrack.idr
 
 import android.app.Application
+import com.fintrack.idr.data.Demo
 import com.fintrack.idr.data.Repo
+import com.fintrack.idr.util.L
 import com.fintrack.idr.util.CrashLog
 import com.fintrack.idr.util.Lang
 import com.fintrack.idr.util.Lock
@@ -15,8 +17,11 @@ class App : Application() {
         super.onCreate()
         CrashLog.install(this)
         Prefs.init(this)
+        val demoFirstRun = Demo.active(this) && !getSharedPreferences("demo", MODE_PRIVATE).getBoolean("seeded", false)
+        if (demoFirstRun) Prefs.language = L.ID // demo opens in Indonesian; can still be changed in Settings
         Lang.init()
         Repo.init(this)
+        if (demoFirstRun) Demo.seedIfNeeded(this)
         Notif.createChannels(this)
         Lock.install(this)
         try { Scheduler.ensure(this) } catch (_: Throwable) { }

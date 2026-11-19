@@ -55,7 +55,8 @@ open class BaseActivity : Activity() {
             (View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
         window.decorView.setBackgroundColor(C.bg)
         // Hide balances from the recent-apps preview and block screenshots when the app lock is on.
-        if (Lock.enabled) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        // (The demo build allows screenshots so store images can show the lock screen.)
+        if (Lock.enabled && !com.fintrack.idr.data.Demo.active(this)) window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
 
     /** Returns the retained ViewModel or creates one. */

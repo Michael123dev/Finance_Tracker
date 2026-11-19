@@ -4,6 +4,9 @@ import com.fintrack.idr.data.Category
 import com.fintrack.idr.data.Export
 import com.fintrack.idr.data.Freq
 import com.fintrack.idr.data.Insights
+import com.fintrack.idr.data.ReceiptDraft
+import com.fintrack.idr.data.ReceiptImage
+import com.fintrack.idr.data.ReceiptMath
 import com.fintrack.idr.data.Recurring
 import com.fintrack.idr.data.RecurringEngine
 import com.fintrack.idr.data.ReportData
@@ -157,6 +160,84 @@ fun main(args: Array<String>) {
     check("edit field never masked", Money.group(1_250_000), "1.250.000")
     Privacy.hidden = false
     check("unmask", Money.fmt(1_250_000), "Rp1.250.000")
+
+
+    // ---- Receipt images (1.1.1)
+    run {
+        val M = ReceiptMath
+        check("fit 12MP photo", M.fitted(4000, 3000), Pair(1632, 1224))
+        check("fit within 2MP", M.fitted(4000, 3000).let { it.first.toLong() * it.second <= M.MAX_PIXELS }, true)
+        check("fit keeps aspect", M.fitted(3000, 4000), Pair(1224, 1632))
+        check("fit long receipt by long side", M.fitted(1000, 6000), Pair(400, 2400))
+        check("fit small untouched", M.fitted(800, 600), Pair(800, 600))
+        check("sample 4000->1632", M.sampleSize(4000, 3000, 1632, 1224), 2)
+        check("sample 12000->1632", M.sampleSize(12000, 9000, 1632, 1224), 4)
+        check("sample never below target", M.sampleSize(4000, 3000, 1632, 1224).let { 4000 / it >= 1632 && 3000 / it >= 1224 }, true)
+        check("sample small", M.sampleSize(800, 600, 800, 600), 1)
+        check("keep small upright jpeg", M.keepOriginal(150_000, "image/jpeg", 1200, 900, 0), true)
+        check("keep small png", M.keepOriginal(90_000, "image/png", 1080, 1920, 0), true)
+        check("keep small webp", M.keepOriginal(90_000, "image/webp", 1080, 1920, 0), true)
+        check("compress when over limit", M.keepOriginal(200_001, "image/jpeg", 1200, 900, 0), false)
+        check("limit is inclusive", M.keepOriginal(200_000, "image/jpeg", 1200, 900, 0), true)
+        check("compress when rotated", M.keepOriginal(150_000, "image/jpeg", 1200, 900, 90), false)
+        check("keep small file even if many pixels", M.keepOriginal(150_000, "image/png", 4000, 3000, 0), true)
+        check("convert other formats", M.keepOriginal(150_000, "image/heif", 1200, 900, 0), false)
+        check("convert unknown", M.keepOriginal(150_000, null, 1200, 900, 0), false)
+        check("exif 6 -> 90", M.rotationFor(6), 90)
+        check("exif 3 -> 180", M.rotationFor(3), 180)
+        check("exif 8 -> 270", M.rotationFor(8), 270)
+        check("exif 1 -> 0", M.rotationFor(1), 0)
+
+        // Compression loop against a size model: bytes ~ pixels x bits-per-pixel(quality).
+        fun model(bitsPerPixel: Double) = { w: Int, h: Int, q: Int -> (w.toLong() * h * bitsPerPixel / 8 * q / 85.0).toInt() }
+        val easy = M.compress(1632, 1224, model(0.6), { it })      // a plain receipt: first try fits
+        check("easy fits first try", easy.attempts, 1)
+        check("easy keeps size", Pair(easy.width, easy.height), Pair(1632, 1224))
+        val hard = M.compress(1632, 1224, model(3.0), { it })      // a noisy photo: needs quality and size steps
+        check("hard ends within limit", hard.result <= M.LIMIT, true)
+        check("hard keeps aspect", Math.abs(hard.width.toDouble() / hard.height - 1632.0 / 1224) < 0.01, true)
+        check("hard tries quality before size", hard.quality < 85, true)
+        println("  receipt model: noisy 2MP photo -> ${hard.width}x${hard.height} q${hard.quality}, ${hard.result} bytes, ${hard.attempts} encodes")
+        val awful = M.compress(2400, 400, model(60.0), { it })     // pathological: still terminates within limit
+        check("awful ends within limit", awful.result <= M.LIMIT, true)
+        val seen = ArrayList<Int>()
+        M.compress(1000, 1000, { _, _, q -> seen += q; if (seen.size < 6) 10_000_000 else 1 }, { it })
+        check("quality order then shrink", seen, listOf(85, 75, 65, 55, 85, 75))
+
+        // Base64 storage
+        val bytes = ByteArray(200_000) { (it * 31 % 256).toByte() }
+        val img = ReceiptImage(bytes, "image/jpeg", 10, 10)
+        val text = img.base64()
+        check("base64 no line breaks", text.contains('\n'), false)
+        check("base64 size ~4/3", text.length, 266_668)
+        check("base64 roundtrip", ReceiptImage.fromBase64(text, "image/jpeg", 10, 10)?.bytes?.contentEquals(bytes), true)
+        check("base64 invalid -> null", ReceiptImage.fromBase64("not*base64!", "image/jpeg", 1, 1), null)
+        check("base64 empty -> null", ReceiptImage.fromBase64("", "image/jpeg", 1, 1), null)
+        check("base64 null -> null", ReceiptImage.fromBase64(null, "image/jpeg", 1, 1), null)
+
+        // Edit flow
+        val mark = "db"
+        val pic = ReceiptImage(byteArrayOf(1, 2, 3), "image/jpeg", 1, 1)
+        val keep = ReceiptDraft(stored = true)
+        check("edit other fields keeps receipt", keep.action(), ReceiptDraft.Action.Keep)
+        check("edit other fields keeps marker", keep.marker(mark, mark), mark)
+        check("existing receipt visible", keep.visible, true)
+        val rem = ReceiptDraft(stored = true).apply { remove() }
+        check("remove -> delete", rem.action(), ReceiptDraft.Action.Delete)
+        check("remove clears marker", rem.marker(mark, mark), null)
+        check("removed not visible", rem.visible, false)
+        val repl = ReceiptDraft(stored = true).apply { replace(pic) }
+        check("replace -> put", (repl.action() as? ReceiptDraft.Action.Put)?.image === pic, true)
+        check("replace marker", repl.marker(mark, mark), mark)
+        val remRepl = ReceiptDraft(stored = true).apply { remove(); replace(pic) }
+        check("remove then replace -> put", remRepl.action() is ReceiptDraft.Action.Put, true)
+        val newTx = ReceiptDraft(stored = false).apply { replace(pic) }
+        check("new tx with photo -> put", newTx.action() is ReceiptDraft.Action.Put, true)
+        val newNone = ReceiptDraft(stored = false).apply { replace(pic); remove() }
+        check("new tx pick then remove -> keep", newNone.action(), ReceiptDraft.Action.Keep)
+        check("new tx pick then remove -> no marker", newNone.marker(null, mark), null)
+        check("new tx nothing -> no marker", ReceiptDraft(stored = false).marker(null, mark), null)
+    }
 
     println("passed=$passes failed=$failures")
     if (failures > 0) System.exit(1)

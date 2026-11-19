@@ -12,8 +12,24 @@ KOTLINC=${KOTLINC:-/opt/kotlinc/bin/kotlinc}
 STDLIB=${KOTLIN_STDLIB:-/opt/kotlinc/lib/kotlin-stdlib.jar}
 OUT=$ROOT/build
 VERSION_NAME=$(grep -o 'versionName="[^"]*"' AndroidManifest.xml | cut -d'"' -f2)
+# VARIANT=demo builds a separate app (com.fintrack.idr.demo) with sample data and screenshots allowed.
+VARIANT=${VARIANT:-release}
+MANIFEST=AndroidManifest.xml
+RENAME=()
+APK_NAME="FinanceTracker-$VERSION_NAME.apk"
+if [ "$VARIANT" = demo ]; then
+  OUT=$ROOT/build-demo
+  APK_NAME="FinanceTracker-Demo-$VERSION_NAME.apk"
+  RENAME=(--rename-manifest-package com.fintrack.idr.demo)
+fi
 
 rm -rf "$OUT" && mkdir -p "$OUT/gen" "$OUT/classes"
+if [ "$VARIANT" = demo ]; then
+  sed -e 's#android:authorities="com.fintrack.idr.files"#android:authorities="com.fintrack.idr.demo.files"#' \
+      -e 's#android:label="@string/app_name"#android:label="Keuangan Demo"#' \
+      -e 's#android:versionName="\([^"]*\)"#android:versionName="\1-demo"#' AndroidManifest.xml > "$OUT/AndroidManifest.xml"
+  MANIFEST="$OUT/AndroidManifest.xml"
+fi
 quiet_aapt() { grep -vE 'ResourceType|E aapt|^$' || true; }
 
 echo "[1/7] Generating R.java"
@@ -48,7 +64,7 @@ dalvik-exchange --dex --min-sdk-version=26 --output="$OUT/classes.dex" "$OUT/min
 if dexdump -d "$OUT/classes.dex" 2>/dev/null | grep -q invoke-custom; then echo "invoke-custom found (not supported)"; exit 1; fi
 
 echo "[5/7] Packaging resources"
-aapt package -f -M AndroidManifest.xml -S res -I "$AJ" -F "$OUT/unsigned.apk" 2>&1 | quiet_aapt
+aapt package -f -M "$MANIFEST" "${RENAME[@]}" -S res -I "$AJ" -F "$OUT/unsigned.apk" 2>&1 | quiet_aapt
 (cd "$OUT" && aapt add unsigned.apk classes.dex >/dev/null)
 
 echo "[6/7] Aligning"
@@ -57,6 +73,6 @@ zipalign -f -p 4 "$OUT/unsigned.apk" "$OUT/aligned.apk"
 echo "[7/7] Signing"
 PASS=$(grep storePassword keystore/keystore.properties | cut -d= -f2)
 apksigner sign --ks keystore/release.jks --ks-key-alias fintrack --ks-pass "pass:$PASS" --key-pass "pass:$PASS" \
-  --min-sdk-version 26 --out "$OUT/FinanceTracker-$VERSION_NAME.apk" "$OUT/aligned.apk"
-apksigner verify "$OUT/FinanceTracker-$VERSION_NAME.apk"
-ls -la "$OUT/FinanceTracker-$VERSION_NAME.apk"
+  --min-sdk-version 26 --out "$OUT/$APK_NAME" "$OUT/aligned.apk"
+apksigner verify "$OUT/$APK_NAME"
+ls -la "$OUT/$APK_NAME"

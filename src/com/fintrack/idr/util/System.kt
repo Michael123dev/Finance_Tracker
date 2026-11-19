@@ -202,9 +202,10 @@ class BootReceiver : BroadcastReceiver() {
 /** Minimal FileProvider replacement: lets the camera app write a photo into our cache folder. */
 class FilesProvider : ContentProvider() {
     companion object {
-        const val AUTHORITY = "com.fintrack.idr.files"
+        /** "<package>.files" so the demo build (another package) can be installed next to the real app. */
+        fun authority(ctx: Context): String = ctx.packageName + ".files"
         fun cameraFile(ctx: Context): File = File(File(ctx.cacheDir, "camera").apply { mkdirs() }, "capture.jpg")
-        fun cameraUri(): Uri = Uri.parse("content://$AUTHORITY/camera/capture.jpg")
+        fun cameraUri(ctx: Context): Uri = Uri.parse("content://${authority(ctx)}/camera/capture.jpg")
     }
 
     private fun resolve(uri: Uri): File? {

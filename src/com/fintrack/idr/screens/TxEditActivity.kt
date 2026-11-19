@@ -1,8 +1,11 @@
 package com.fintrack.idr.screens
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
+import android.graphics.Bitmap
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
@@ -15,6 +18,7 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import com.fintrack.idr.data.Category
 import com.fintrack.idr.data.Freq
+import com.fintrack.idr.data.ReceiptDraft
 import com.fintrack.idr.data.Receipts
 import com.fintrack.idr.data.Recurring
 import com.fintrack.idr.data.RecurringEngine
@@ -27,6 +31,7 @@ import com.fintrack.idr.ui.Icon
 import com.fintrack.idr.ui.MATCH
 import com.fintrack.idr.ui.MEDIUM
 import com.fintrack.idr.ui.ViewModel
+import com.fintrack.idr.ui.choose
 import com.fintrack.idr.ui.WRAP
 import com.fintrack.idr.ui.add
 import com.fintrack.idr.ui.chip
@@ -73,9 +78,16 @@ class TxEditVM : ViewModel() {
     var toWalletId: Long? = null
     var date = D.today()
     var time = 0L
-    var receipt: String? = null
+    /** tx.receipt as loaded (Receipts.MARK when the transaction has a stored photo). */
     var originalReceipt: String? = null
-    val tempReceipts = ArrayList<String>()
+    /** Pending receipt change; applied only when the user saves. */
+    var draft = ReceiptDraft(false)
+    var receiptBusy = false
+    var thumb: Bitmap? = null
+    var thumbKey: Any? = null
+    var thumbBytes = 0
+    /** Redraws the receipt row of whichever screen instance is showing (survives rotation). */
+    var onReceiptChanged: (() -> Unit)? = null
     var recurringId: Long? = null
     var linkedRule: Recurring? = null
     var repeat = false
@@ -137,7 +149,10 @@ class TxEditActivity : BaseActivity() {
                 val t = r.tx
                 vm.id = t.id; vm.type = t.type; vm.amount = t.amount; vm.title = t.title; vm.note = t.note
                 vm.categoryId = t.categoryId; vm.walletId = t.walletId; vm.toWalletId = t.toWalletId
-                vm.date = t.date; vm.time = t.time; vm.receipt = t.receipt; vm.originalReceipt = t.receipt
+                vm.date = t.date; vm.time = t.time; vm.originalReceipt = t.receipt
+                // Keep an image picked before loading finished (the screen can be rebuilt while the picker is open).
+                val picked = vm.draft.pending
+                vm.draft = ReceiptDraft(t.receipt != null).also { d -> if (picked != null) d.replace(picked) }
                 vm.recurringId = t.recurringId
                 vm.linkedRule = t.recurringId?.let { Repo.recurring(it) }
             }
@@ -193,7 +208,7 @@ class TxEditActivity : BaseActivity() {
         walletRows()
         dateRow()
         noteRow()
-        if (!vm.ruleMode) receiptRow()
+        if (!vm.ruleMode) { vm.onReceiptChanged = { if (!isDestroyed) renderReceipt() }; receiptRow() }
         repeatRows()
     }
 
@@ -343,28 +358,79 @@ class TxEditActivity : BaseActivity() {
     private fun renderReceipt() {
         val box = receiptBox ?: return
         box.removeAllViews()
-        val name = vm.receipt
-        if (name != null) {
-            val img = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                background = rounded(C.card2, dpf(14f))
-                clipToOutline = true
-                contentDescription = tr("Receipt photo", "Foto struk")
-                setOnClickListener { startActivity(Intent(this@TxEditActivity, ReceiptActivity::class.java).putExtra(ReceiptActivity.EXTRA_NAME, name)) }
+        val d = vm.draft
+        when {
+            vm.receiptBusy -> box.add(label(tr("Compressing photo…", "Mengompres foto…"), 14f, C.text2).apply {
+                background = rounded(C.card2, dpf(14f)); setPadding(dp(14), dp(14), dp(14), dp(14))
+            }, MATCH, WRAP)
+            d.visible -> {
+                val img = ImageView(this).apply {
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = rounded(C.card2, dpf(14f))
+                    clipToOutline = true
+                    contentDescription = tr("Receipt photo", "Foto struk")
+                    setOnClickListener { viewReceipt() }
+                }
+                val info = label("", 12.5f, C.text3)
+                box.add(hbox {
+                    add(img, dp(120), dp(160))
+                    val col = vbox()
+                    col.add(secondaryButton(tr("View", "Lihat")) { viewReceipt() }, MATCH, WRAP)
+                    col.add(secondaryButton(tr("Replace", "Ganti")) { chooseReceiptSource() }, MATCH, WRAP, t = 8)
+                    col.add(secondaryButton(tr("Remove", "Hapus"), C.expense) {
+                        vm.draft.remove(); vm.thumb = null; vm.thumbKey = null; renderReceipt()
+                    }, MATCH, WRAP, t = 8)
+                    add(col, 0, WRAP, 1f, l = 12)
+                })
+                box.add(info, MATCH, WRAP, t = 6)
+                showThumb(img, info)
             }
-            Repo.async({ Receipts.thumbnail(applicationContext, name, dp(240)) }) { bmp -> if (bmp != null) img.setImageBitmap(bmp) }
-            box.add(hbox {
-                add(img, dp(96), dp(96))
-                val col = vbox()
-                col.add(secondaryButton(tr("View", "Lihat")) { img.performClick() }, MATCH, WRAP)
-                col.add(secondaryButton(tr("Remove", "Hapus"), C.expense) { vm.receipt = null; renderReceipt() }, MATCH, WRAP, t = 8)
-                add(col, 0, WRAP, 1f, l = 12)
-            })
-        } else {
-            box.add(hbox {
+            else -> box.add(hbox {
                 add(secondaryButton("📷 " + tr("Camera", "Kamera")) { takePhoto() }, 0, WRAP, 1f, r = 6)
                 add(secondaryButton("🖼️ " + tr("Gallery", "Galeri")) { pickImage() }, 0, WRAP, 1f, l = 6)
             })
+        }
+    }
+
+    /** Thumbnail of the new image, or of the stored one decoded from the database. */
+    private fun showThumb(img: ImageView, info: android.widget.TextView) {
+        val pending = vm.draft.pending
+        val key: Any = pending ?: "stored"
+        val sizeText = { n: Int -> tr("Photo size: ", "Ukuran foto: ") + Money.group(((n + 999) / 1000).toLong()) + " KB" }
+        val cached = vm.thumb
+        if (cached != null && vm.thumbKey === key) {
+            img.setImageBitmap(cached); info.text = sizeText(vm.thumbBytes); return
+        }
+        val id = vm.id
+        val px = dp(240)
+        Repo.async({
+            val src = pending ?: if (id > 0) Repo.receipt(id) else null
+            src?.let { it.bytes.size to Receipts.decode(it.bytes, px) }
+        }) { r ->
+            val bmp = r?.second
+            if (bmp != null) {
+                vm.thumb = bmp; vm.thumbKey = key; vm.thumbBytes = r.first
+                img.setImageBitmap(bmp); info.text = sizeText(r.first)
+            } else {
+                info.setTextColor(C.expense)
+                info.text = tr("This photo can't be shown. Replace or remove it.", "Foto ini tidak bisa ditampilkan. Ganti atau hapus.")
+            }
+        }
+    }
+
+    private fun viewReceipt() {
+        val i = Intent(this, ReceiptActivity::class.java)
+        val pending = vm.draft.pending
+        if (pending != null) {
+            ReceiptActivity.pending = pending
+            i.putExtra(ReceiptActivity.EXTRA_PENDING, true)
+        } else i.putExtra(ReceiptActivity.EXTRA_TX, vm.id)
+        startActivity(i)
+    }
+
+    private fun chooseReceiptSource() {
+        choose(tr("Replace receipt photo", "Ganti foto struk"), listOf("📷 " + tr("Camera", "Kamera"), "🖼️ " + tr("Gallery", "Galeri")), -1) { i ->
+            if (i == 0) takePhoto() else pickImage()
         }
     }
 
@@ -470,17 +536,23 @@ class TxEditActivity : BaseActivity() {
             var msg: String? = null
             if (!vm.ruleMode) {
                 val now = System.currentTimeMillis()
+                val draft = vm.draft
                 val tx = Tx(vm.id, vm.type, vm.amount, catId, wallet, toWallet, title, note, vm.date,
-                    if (vm.time > 0) vm.time else now, vm.recurringId, vm.receipt)
+                    if (vm.time > 0) vm.time else now, vm.recurringId, draft.marker(vm.originalReceipt, Receipts.MARK))
+                // Transaction and photo are saved together: either both change or neither does.
                 Repo.inTransaction {
-                    if (vm.id == 0L) {
+                    val txId = if (vm.id == 0L) {
                         var rid: Long? = null
                         if (vm.repeat) rid = Repo.saveRecurring(Recurring(0, vm.type, vm.amount, catId, wallet, toWallet, title, note,
                             vm.freq, 1, vm.date, null, 1, true, 1, -1))
                         Repo.insertTx(tx.copy(recurringId = rid))
-                    } else Repo.updateTx(tx)
+                    } else { Repo.updateTx(tx); vm.id }
+                    when (val a = draft.action()) {
+                        is ReceiptDraft.Action.Put -> Repo.putReceipt(txId, a.image)
+                        ReceiptDraft.Action.Delete -> Repo.deleteReceipt(txId)
+                        ReceiptDraft.Action.Keep -> {}
+                    }
                 }
-                if (vm.originalReceipt != null && vm.originalReceipt != vm.receipt) Receipts.delete(ctx, vm.originalReceipt)
                 if (vm.repeat) RecurringEngine.run(D.today())
                 if (vm.type == TxType.EXPENSE && catId != null) msg = BudgetAlert.check(ctx, catId, vm.date, notify = false)
                 Prefs.lastWallet = wallet
@@ -496,8 +568,6 @@ class TxEditActivity : BaseActivity() {
             msg
         }) { msg ->
             vm.saved = true
-            vm.tempReceipts.filter { it != vm.receipt }.forEach { Receipts.delete(ctx, it) }
-            vm.tempReceipts.clear()
             toast(msg ?: tr("Saved", "Tersimpan"))
             finish()
         }
@@ -513,8 +583,7 @@ class TxEditActivity : BaseActivity() {
         } else {
             confirm(tr("Delete this transaction?", "Hapus transaksi ini?"), tr("This cannot be undone.", "Tindakan ini tidak bisa dibatalkan."),
                 tr("Delete", "Hapus"), danger = true) {
-                val ctx = applicationContext
-                Repo.async({ Repo.deleteTx(vm.id); Receipts.delete(ctx, vm.originalReceipt) }) {
+                Repo.async({ Repo.deleteTx(vm.id) }) {
                     vm.saved = true
                     toast(tr("Deleted", "Dihapus"))
                     finish()
@@ -526,7 +595,7 @@ class TxEditActivity : BaseActivity() {
     private fun takePhoto() {
         val f = FilesProvider.cameraFile(this)
         f.delete()
-        val uri = FilesProvider.cameraUri()
+        val uri = FilesProvider.cameraUri(this)
         val i = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
             .putExtra(MediaStore.EXTRA_OUTPUT, uri)
             .addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -536,34 +605,47 @@ class TxEditActivity : BaseActivity() {
     }
 
     private fun pickImage() {
-        val i = Intent(Intent.ACTION_GET_CONTENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE)
+        // Android 13+: the system photo picker (no storage permission). Older: any gallery or file app.
+        val legacy = Intent(Intent.ACTION_GET_CONTENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE)
+        val intents = if (Build.VERSION.SDK_INT >= 33) listOf(Intent(MediaStore.ACTION_PICK_IMAGES).setType("image/*"), legacy) else listOf(legacy)
         Lock.allowExternal()
-        try { startActivityForResult(i, REQ_GALLERY) } catch (_: Throwable) { Lock.externalUntil = 0; toast(tr("No gallery app found", "Aplikasi galeri tidak ditemukan")) }
+        for (i in intents) {
+            try { startActivityForResult(i, REQ_GALLERY); return } catch (_: ActivityNotFoundException) { }
+        }
+        Lock.externalUntil = 0
+        toast(tr("No gallery app found", "Aplikasi galeri tidak ditemukan"))
     }
 
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
+        if (requestCode != REQ_CAMERA && requestCode != REQ_GALLERY) return
         val ctx = applicationContext
-        val open: (() -> java.io.InputStream?)? = when (requestCode) {
-            REQ_CAMERA -> { { FilesProvider.cameraFile(ctx).takeIf { it.length() > 0 }?.inputStream() } }
-            REQ_GALLERY -> data?.data?.let { uri -> { ctx.contentResolver.openInputStream(uri) } }
-            else -> null
+        if (resultCode != RESULT_OK) {
+            if (requestCode == REQ_CAMERA) FilesProvider.cameraFile(ctx).delete()
+            return
         }
-        if (open == null) return
-        Repo.async({ Receipts.save(ctx, open) }) { name ->
-            vm.receipt = name
-            vm.tempReceipts += name
-            if (::form.isInitialized) renderReceipt()
+        val read: () -> ByteArray = if (requestCode == REQ_CAMERA) {
+            { val f = FilesProvider.cameraFile(ctx); try { Receipts.readFile(f) } finally { f.delete() } }
+        } else {
+            val uri = data?.data ?: run { toast(tr("No image was selected.", "Tidak ada gambar yang dipilih.")); return }
+            ({ Receipts.readUri(ctx, uri) })
+        }
+        vm.receiptBusy = true
+        vm.onReceiptChanged?.invoke()
+        val model = vm
+        Receipts.prepareAsync(read) { img, err ->
+            model.receiptBusy = false
+            if (img != null) { model.draft.replace(img); model.thumb = null; model.thumbKey = null }
+            model.onReceiptChanged?.invoke()
+            if (err != null) android.widget.Toast.makeText(ctx, err, android.widget.Toast.LENGTH_LONG).show()
         }
     }
 
     override fun onDestroy() {
-        if (isFinishing && !vm.saved) {
-            val ctx = applicationContext
-            vm.tempReceipts.forEach { Receipts.delete(ctx, it) }
-            vm.tempReceipts.clear()
+        if (::vm.isInitialized) {
+            vm.onReceiptChanged = null
+            if (isFinishing) ReceiptActivity.pending = null
         }
         super.onDestroy()
     }

@@ -27,6 +27,7 @@ import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import com.fintrack.idr.R
+import com.fintrack.idr.data.ReceiptImage
 import com.fintrack.idr.data.Receipts
 import com.fintrack.idr.data.Repo
 import com.fintrack.idr.data.TxFilter
@@ -661,20 +662,31 @@ class LockActivity : BaseActivity() {
 // =================================================================== Receipt viewer
 
 class ReceiptActivity : BaseActivity() {
-    companion object { const val EXTRA_NAME = "name" }
+    companion object {
+        /** Show the stored photo of this transaction. */
+        const val EXTRA_TX = "tx_id"
+        /** Show [pending]: a photo picked in the edit screen and not saved yet. */
+        const val EXTRA_PENDING = "pending"
+        @Volatile var pending: ReceiptImage? = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = 0xFF000000.toInt()
-        val name = intent.getStringExtra(EXTRA_NAME) ?: run { finish(); return }
+        val txId = intent.getLongExtra(EXTRA_TX, 0L)
+        val held = if (intent.getBooleanExtra(EXTRA_PENDING, false)) pending else null
+        if (txId <= 0L && held == null) { finish(); return }
         val img = ZoomImageView(this)
         val root = FrameLayout(this).apply { setBackgroundColor(0xFF000000.toInt()) }
         root.addF(img)
         root.addF(iconButton(Icon.CLOSE, 0xFFFFFFFF.toInt(), desc = tr("Close", "Tutup")) { finish() }, dp(48), dp(48), Gravity.TOP or Gravity.END, t = 8, r = 8)
         setContentView(root)
         val max = maxOf(resources.displayMetrics.widthPixels, resources.displayMetrics.heightPixels) * 2
-        Repo.async({ Receipts.thumbnail(applicationContext, name, max) }) { bmp ->
-            if (bmp == null) { toast(tr("Receipt photo not found", "Foto struk tidak ditemukan")); finish() } else img.setBitmap(bmp)
+        Repo.async({
+            val src = held ?: Repo.receipt(txId)
+            src?.let { Receipts.decode(it.bytes, max) }
+        }) { bmp ->
+            if (bmp == null) { toast(tr("This receipt photo can't be shown.", "Foto struk ini tidak bisa ditampilkan.")); finish() } else img.setBitmap(bmp)
         }
     }
 }

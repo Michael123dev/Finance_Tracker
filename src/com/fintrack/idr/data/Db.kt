@@ -5,8 +5,12 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import com.fintrack.idr.util.tr
+import java.io.File
 
 class Db(ctx: Context) : SQLiteOpenHelper(ctx, NAME, null, VERSION) {
+    private val appCtx: Context = ctx.applicationContext
+    /** Old receipt files moved into the database; deleted only after the upgrade has committed. */
+    private val migratedFiles = ArrayList<File>()
 
     init {
         // Plain rollback journal: the database is a single file, which keeps backup/restore simple and safe.
@@ -90,7 +94,49 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, NAME, null, VERSION) {
                 note TEXT NOT NULL DEFAULT '')"""
         )
         db.execSQL("CREATE INDEX goal_entry_goal ON goal_entry(goal_id)")
+        createReceiptTable(db)
         seed(db)
+    }
+
+    /**
+     * One compressed receipt image per transaction (version 2). data = Base64 of the image binary (at most
+     * ReceiptMath.LIMIT bytes before encoding). tx.receipt holds Receipts.MARK while a row exists here.
+     */
+    private fun createReceiptTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS receipt_image(
+                tx_id INTEGER PRIMARY KEY,
+                mime TEXT NOT NULL,
+                bytes INTEGER NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                data TEXT NOT NULL,
+                updated INTEGER NOT NULL)"""
+        )
+    }
+
+    /** Version 1 kept receipt photos as files and tx.receipt as the file name: compress each into receipt_image. */
+    private fun migrateReceiptFiles(db: SQLiteDatabase) {
+        val rows = ArrayList<Pair<Long, String>>()
+        db.rawQuery("SELECT id, receipt FROM tx WHERE receipt IS NOT NULL", null).use { c ->
+            while (c.moveToNext()) rows += c.getLong(0) to c.getString(1)
+        }
+        if (rows.isEmpty()) return
+        val dir = Receipts.dir(appCtx)
+        for ((id, name) in rows) {
+            val f = File(dir, name)
+            val img = try { Receipts.prepare(Receipts.readFile(f)) } catch (t: Throwable) {
+                android.util.Log.w("Db", "receipt $name for tx $id not migrated", t); null
+            }
+            if (img != null) {
+                db.insertWithOnConflict("receipt_image", null, Receipts.values(id, img), SQLiteDatabase.CONFLICT_REPLACE)
+                db.execSQL("UPDATE tx SET receipt=? WHERE id=?", arrayOf<Any>(Receipts.MARK, id))
+                migratedFiles += f
+            } else {
+                // Missing or unreadable file: the transaction stays, without an attachment it could never show.
+                db.execSQL("UPDATE tx SET receipt=NULL WHERE id=?", arrayOf<Any>(id))
+            }
+        }
     }
 
     private fun seed(db: SQLiteDatabase) {
@@ -112,7 +158,16 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, NAME, null, VERSION) {
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // Future schema migrations go here, one step per version.
+        // One step per version. Runs in a single transaction: if anything throws, the old database is left untouched.
+        if (oldVersion < 2) {
+            createReceiptTable(db)
+            migrateReceiptFiles(db)
+        }
+    }
+
+    override fun onOpen(db: SQLiteDatabase) {
+        migratedFiles.forEach { it.delete() }
+        migratedFiles.clear()
     }
 
     override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -121,6 +176,7 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, NAME, null, VERSION) {
 
     companion object {
         const val NAME = "finance.db"
-        const val VERSION = 1
+        /** 1 = 1.0.0-1.1.0; 2 = 1.1.1 (receipt_image). */
+        const val VERSION = 2
     }
 }

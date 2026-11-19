@@ -5,6 +5,28 @@ UI language: English or Bahasa Indonesia, chosen in Settings (default: follow th
 
 ## Changelog
 
+**1.1.1** (versionCode 3) — installs over 1.1.0 and 1.0.0, keeps all data (database upgraded to version 2 automatically)
+- Fixed: adding a receipt photo always failed with "Something went wrong: Cannot open image". Cause: `Receipts.save`
+  read the image size with `BitmapFactory.decodeStream(..., inJustDecodeBounds = true)`, which by design returns `null`,
+  and treated that `null` as "can't open" (`?: throw`). Every photo, from camera or gallery, was rejected.
+  The check now uses the decoded width/height.
+- Picking: Android 13+ opens the system photo picker (no storage permission); older versions use any gallery/file app.
+  The picked file is read once, completely (max 40 MB), so the picker's temporary permission is only needed for that read.
+  JPG, PNG and WebP work on every supported Android version (HEIC also on Android 9+). Unreadable, damaged, empty or
+  unsupported files show a specific message instead of a generic error.
+- Compression: every photo is stored at **200,000 bytes or less** (the image binary, not the Base64 text). It is turned
+  upright (EXIF), fitted within 2 megapixels and 2400 px (aspect ratio kept), transparent areas are put on white, then
+  JPEG is encoded at quality 85 → 75 → 65 → 55, shrinking the size by 20% between rounds until it fits.
+  A JPG/PNG/WebP that is already ≤ 200,000 bytes and upright is stored unchanged. Processing runs off the main thread.
+- Storage: new table `receipt_image` (one row per transaction: `tx_id`, `mime`, `bytes`, `width`, `height`,
+  `data` = Base64, `updated`). `tx.receipt` holds `db` while a photo exists, so lists never load image data.
+  Photos are inside the database, so they survive restarts and are in every backup. Deleting a transaction deletes its photo.
+- Editing: the stored photo shows when a transaction is opened (with its size); **Replace** (camera or gallery) and
+  **Remove** apply only when you tap Save, together with the other fields in one database transaction. Editing other
+  fields leaves the photo untouched. A photo that can't be decoded shows a message and can be replaced or removed.
+- Migration 1 → 2: creates `receipt_image` and moves any old receipt files from `files/receipts` into it (compressed the
+  same way). The upgrade runs in one transaction; old files are deleted only after it has committed.
+
 **1.1.0** (versionCode 2) — installs over 1.0.0, keeps all data (no database change)
 - Fingerprint lock: Settings → Security → Fingerprint lock. Fallback = app PIN if set, otherwise the phone's screen lock
   (PIN/pattern/password). Android 9+ uses the system fingerprint dialog; Android 8.x uses the sensor directly on the lock screen.
@@ -36,12 +58,12 @@ UI language: English or Bahasa Indonesia, chosen in Settings (default: follow th
 | Month-over-month trend, top 5 highest / lowest categories | Reports tab |
 | Calendar view | `CalendarActivity` |
 | Export Excel / CSV | `data/Export.kt` — real .xlsx (dates, Rp number format, frozen header, autofilter, summary sheet) and UTF-8 CSV |
-| Backup & restore | `data/Files.kt` `Backup` — one .zip with the database + receipt photos, validated before restoring |
+| Backup & restore | `data/Files.kt` `Backup` — one .zip with the database (receipt photos are inside it), validated before restoring; older backups are upgraded on restore |
 | Dark mode | Settings → Theme (follow phone / light / dark) |
 | PIN / fingerprint lock | `util/Auth.kt`, Settings → Security; fingerprint with PIN or phone screen-lock fallback, PBKDF2-hashed PIN, lockout after 5 wrong tries, screenshots blocked while any lock is on |
 | Language | `util/Core.kt` `L` + `util/Auth.kt` `Lang`; all text goes through `tr(en, id)` |
 | Show / hide amounts | `util/Core.kt` `Privacy` — masking happens in `Money.fmt/compact`, so every screen follows it |
-| Receipt photos | Camera or gallery, downscaled to 1600 px JPEG, stored privately, included in backups |
+| Receipt photos | `data/Files.kt` `Receipts`, `data/ReceiptLogic.kt` — camera or photo picker, compressed to ≤ 200,000 bytes, Base64 in `receipt_image`, included in backups |
 | Financial insights | `data/Insights.kt` — rule-based (savings rate, pace projection, category spikes, budgets, weekend share, small purchases) |
 | Reminders | Daily "record your spending" reminder, budget alerts (threshold + exceeded), upcoming recurring payments |
 
@@ -81,7 +103,9 @@ forces an uninstall, which deletes all data on the phone (back up first).
 ## Tests
 
 - `test/LogicTests.kt` — money formatting/parsing, recurring date maths (month-end, leap years, catch-up, end dates),
-  CSV escaping and formula-injection guard, XLSX generation, insights. Run on the JVM against the compiled classes.
+  CSV escaping and formula-injection guard, XLSX generation, insights, receipt sizing/compression schedule, Base64
+  round trip and the keep/replace/remove edit rules (123 checks). Run on the JVM against the compiled classes:
+  `kotlinc test/LogicTests.kt -cp build/classes:$ANDROID_JAR -d /tmp/lt && java -cp /tmp/lt:build/classes:kotlin-stdlib.jar LogicTestsKt`
 - `test/api_check.py` — scans `classes.dex` for framework APIs missing on API 26 (only biometrics are flagged, and they are behind SDK checks).
 - Generated .xlsx files were validated with openpyxl and LibreOffice.
 

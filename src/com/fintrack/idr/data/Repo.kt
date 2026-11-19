@@ -211,8 +211,32 @@ object Repo {
     }
 
     fun deleteTx(id: Long) {
-        db.delete("tx", "id=?", arrayOf(id.toString()))
+        inTransaction {
+            db.delete("receipt_image", "tx_id=?", arrayOf(id.toString()))
+            db.delete("tx", "id=?", arrayOf(id.toString()))
+        }
         changed()
+    }
+
+    // ---------------------------------------------------------------- receipt images (Base64 in receipt_image)
+
+    /** Null when there is no row or its data isn't valid Base64. */
+    fun receipt(txId: Long): ReceiptImage? =
+        query("SELECT mime, width, height, data FROM receipt_image WHERE tx_id=?", arrayOf<Any?>(txId)) { c ->
+            ReceiptImage.fromBase64(c.getString(3), c.getString(0), c.getInt(1), c.getInt(2))
+        }.firstOrNull()
+
+    /** Adds or replaces the transaction's receipt (one per transaction, so a replacement never leaves a copy behind). */
+    fun putReceipt(txId: Long, img: ReceiptImage) {
+        db.insertWithOnConflict("receipt_image", null, Receipts.values(txId, img), SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun deleteReceipt(txId: Long) {
+        db.delete("receipt_image", "tx_id=?", arrayOf(txId.toString()))
+    }
+
+    fun deleteOrphanReceipts() {
+        db.execSQL("DELETE FROM receipt_image WHERE tx_id NOT IN (SELECT id FROM tx)")
     }
 
     private const val TX_SELECT =
